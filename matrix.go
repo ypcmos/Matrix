@@ -740,12 +740,6 @@ func (m *Matrixf64) eig2() (ret []complex128) {
 	}
 	return
 }
-func pause(d string) {
-	fmt.Println(d)
-	var in string
-	fmt.Scanf("%s", &in)
-	fmt.Println(in)
-}
 
 /* WARNING: this function will damage the matrix 'm' */
 func (m *Matrixf64) eig(ret *[]complex128) {
@@ -858,12 +852,12 @@ func (m *Matrixf64) Eig() (ret []complex128) {
 
 func (m *Matrixf64) Gauss() *Matrixf64 {
 	tmp := NewMatrixf64(*m)
-	tmp.gauss(0)
+	tmp.gauss()
 	return &tmp
 }
 
 /* WARNING: this function will damage the matrix 'm' */
-func (m *Matrixf64) gauss(offset int) {
+func (m *Matrixf64) gauss() {
 	rn := m.GetRowNum()
 	cn := m.GetColNum()
 	d := func(i, j int) (ret int) {
@@ -902,7 +896,7 @@ func (m *Matrixf64) gauss(offset int) {
 				break
 			}
 			sm := getChunk(m, i, i+1)
-			sm.gauss(i)
+			sm.gauss()
 			*m = func(tm *Matrixf64) Matrixf64 {
 				return *m.Replace(tm, i, i+1)
 			}(sm)
