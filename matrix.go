@@ -15,6 +15,7 @@ package matrix
 import (
 	"fmt"
 	. "math"
+	"math/cmplx"
 )
 
 const (
@@ -22,6 +23,14 @@ const (
 )
 
 type Matrixf64 [][]float64
+
+type MatrixErr struct {
+	err string
+}
+
+func (me *MatrixErr) Error() string {
+	return me.err
+}
 
 /* Matrixf64 */
 func NewMatrixf64(any [][]float64) Matrixf64 {
@@ -55,6 +64,18 @@ func If64(d int) Matrixf64 {
 	for i := 0; i < d; i++ {
 		m[i] = make([]float64, d)
 		m[i][i] = 1.0
+	}
+	return m
+}
+
+func Diagf64(any []float64) Matrixf64 {
+	d := len(any)
+	var m Matrixf64
+	m = make([][]float64, d)
+
+	for i := 0; i < d; i++ {
+		m[i] = make([]float64, d)
+		m[i][i] = any[i]
 	}
 	return m
 }
@@ -203,28 +224,8 @@ func (m *Matrixf64) multipleAdd(index, src int, mul float64) {
 }
 
 func (m *Matrixf64) Rank() int {
-	rn := m.GetRowNum()
-	if rn > m.GetColNum() {
-		return m.T().Rank()
-	}
-
 	tmp := NewMatrixf64(*m)
-	for i := 0; i < rn; i++ {
-		maxIndex := tmp.pivot(i)
-		if Abs(tmp[maxIndex][i]) < zero {
-			return i
-		}
-
-		if maxIndex != i {
-			tmp.exchange(i, maxIndex)
-		}
-
-		for j := i + 1; j < rn; j++ {
-			dMul := -tmp[j][i] / tmp[i][i]
-			tmp.multipleAdd(j, i, dMul)
-		}
-	}
-	return rn
+	return tmp.rank()
 }
 
 func (m *Matrixf64) Det() (ret float64) {
@@ -563,7 +564,7 @@ func (m *Matrixf64) Equal(rm *Matrixf64) bool {
 }
 
 /* please make sure 'm' has enough space to accommodate the smaller matrix 'im' , or system will throw a panic*/
-func (m *Matrixf64) Insert(im *Matrixf64, row, col int) *Matrixf64 {
+func (m *Matrixf64) Replace(im *Matrixf64, row, col int) *Matrixf64 {
 	tmp := NewMatrixf64(*m)
 	for i, r := range *im {
 		for j, v := range r {
@@ -618,11 +619,10 @@ func (m *Matrixf64) Hess() (Q, B Matrixf64) {
 		panic("Matrix must be square.")
 	}
 
-	A := NewMatrixf64(*m)
 	H := Of64(rn, cn)
 	I := If64(rn)
 	Q = If64(rn)
-	B = If64(rn)
+	B = NewMatrixf64(*m)
 	for r := 0; r < rn-2; r++ {
 		alen := rn - r - 1
 		row := make([]int, alen)
@@ -632,26 +632,534 @@ func (m *Matrixf64) Hess() (Q, B Matrixf64) {
 		}
 		col := make([]int, 1)
 		col[0] = r
-		a := A.Piece(row, col)
+		a := B.Piece(row, col)
 		d := a.VectorNorm2()
 		var c float64
-		if Abs(d) < zero {
+		ar := (*a)[0][0]
+		(*a)[0][0] = 0
+		if a.VectorNormInf() < zero {
 			H = If64(rn)
 		} else {
-			if Abs((*a)[0][0]) < zero {
+			if Abs(ar) < zero {
 				c = d
 			} else {
-				c = float64(-sign((*a)[0][0])) * d
+				c = float64(-sign(ar)) * d
 			}
 
-			(*a)[0][0] -= c
+			(*a)[0][0] = ar - c
 			u := Of64(rn, 1)
-			ur := u.Insert(a, r+1, 0)
+			ur := u.Replace(a, r+1, 0)
 			H = *I.Sub(ur.Mul(ur.T()).DotMul(2.0).DivDot((*ur.T().Mul(ur))[0][0]))
 		}
-		B = *H.Mul(&A).Mul(&H)
-		A = B
+		B = *H.Mul(&B).Mul(&H)
 		Q = *Q.Mul(&H)
 	}
 	return
+}
+
+func (m *Matrixf64) QR() (Q, R Matrixf64) {
+	rn := m.GetRowNum()
+	cn := m.GetColNum()
+	if rn != cn {
+		panic("Matrix must be square.")
+	}
+
+	R = NewMatrixf64(*m)
+	H := Of64(rn, cn)
+	I := If64(rn)
+	Q = If64(rn)
+	for r := 0; r < rn-1; r++ {
+		alen := rn - r
+		row := make([]int, alen)
+
+		for i := 0; i < alen; i++ {
+			row[i] = r + i
+		}
+		col := make([]int, 1)
+		col[0] = r
+		a := R.Piece(row, col)
+		d := a.VectorNorm2()
+		ar := (*a)[0][0]
+		var c float64
+		if a.VectorNormInf() < zero {
+			H = If64(rn)
+		} else {
+			if Abs(ar) < zero {
+				c = d
+			} else {
+				c = float64(-sign(ar)) * d
+			}
+
+			(*a)[0][0] = ar - c
+			u := Of64(rn, 1)
+			ur := u.Replace(a, r, 0)
+			H = *I.Sub(ur.Mul(ur.T()).DotMul(2.0).DivDot((*ur.T().Mul(ur))[0][0]))
+		}
+		R = *H.Mul(&R)
+		Q = *Q.Mul(&H)
+	}
+
+	/* 	
+		Makes 'R' with diagonal elements which are non-negative real numbers 
+		A = qr = qI'Ir = qIIr = QR  =>  Q = qI, R=Ir
+		(I = [...
+				-1
+					...
+						1
+							...])
+	*/
+	for i, _ := range R {
+		if sign(R[i][i]) == -1 {
+			I[i][i] = -1
+		}
+	}
+	R = *I.Mul(&R)
+	Q = *Q.Mul(&I)
+	return
+}
+
+func (m *Matrixf64) eig2() (ret []complex128) {
+	rn := m.GetRowNum()
+	cn := m.GetColNum()
+	if rn != cn {
+		panic("Matrix must be square.")
+	}
+
+	switch rn {
+	case 1:
+		ret = make([]complex128, 1)
+		ret[0] = complex((*m)[0][0], 0)
+	case 2:
+		ret = make([]complex128, 2)
+		ret[0] = 0.5 * (complex((*m)[0][0]+(*m)[1][1], 0) +
+			cmplx.Sqrt(complex(Pow((*m)[0][0]+(*m)[1][1], 2.0)-4*((*m)[0][0]*(*m)[1][1]-(*m)[0][1]*(*m)[1][0]), 0)))
+		ret[1] = 0.5 * (complex((*m)[0][0]+(*m)[1][1], 0) -
+			cmplx.Sqrt(complex(Pow((*m)[0][0]+(*m)[1][1], 2.0)-4*((*m)[0][0]*(*m)[1][1]-(*m)[0][1]*(*m)[1][0]), 0)))
+	default:
+		panic("Only support matirx that dimension <= 2.")
+	}
+	return
+}
+func pause(d string) {
+	fmt.Println(d)
+	var in string
+	fmt.Scanf("%s", &in)
+	fmt.Println(in)
+}
+
+/* WARNING: this function will damage the matrix 'm' */
+func (m *Matrixf64) eig(ret *[]complex128) {
+	rn := m.GetRowNum()
+	cn := m.GetColNum()
+	if rn != cn {
+		panic("Matrix must be square.")
+	}
+	getChunk := func(m *Matrixf64, i int) (rm *Matrixf64) {
+		size := rn - i
+		rc := make([]int, size)
+
+		for _i := 0; _i < size; _i++ {
+			rc[_i] = _i + i
+		}
+		rm = m.Piece(rc, rc)
+
+		rc = make([]int, i)
+		for _i := 0; _i < i; _i++ {
+			rc[_i] = _i
+		}
+		*m = *m.Piece(rc, rc)
+		return
+	}
+
+	qr2 := func(m *Matrixf64) Matrixf64 {
+		//rd >= 3
+		rd := m.GetRowNum()
+		del := (*m)[rd-1][rd-1] + (*m)[rd-2][rd-2]
+		rou := (*m)[rd-1][rd-1]*(*m)[rd-2][rd-2] - (*m)[rd-1][rd-2]*(*m)[rd-2][rd-1]
+		p := (*m)[0][0]*((*m)[0][0]-del) + (*m)[0][1]*(*m)[1][0] + rou
+		q := (*m)[1][0] * ((*m)[0][0] + (*m)[1][1] - del)
+		r := (*m)[1][0] * (*m)[2][1]
+		getP := func(i int, p, q, r float64) (ret Matrixf64) {
+			a := NewVectorf64([]float64{p, q, r})
+			if rd-i < 4 {
+				a = a[0:2]
+			}
+			var c float64
+			if Abs(p) < zero {
+				c = a.VectorNorm2()
+			} else {
+				c = float64(sign(p)) * a.VectorNorm2()
+			}
+			v := Of64(rd, 1)
+			a[0][0] += c
+
+			v = *v.Replace(&a, i+1, 0)
+			ret = If64(rd)
+			if v.VectorNormInf() > zero {
+				ret = *ret.Sub(v.Mul(v.T()).DotMul(2 / Pow(v.VectorNorm2(), 2.0)))
+			}
+			return
+		}
+		P := getP(-1, p, q, r)
+		*m = *P.Mul(m).Mul(&P)
+		for i := 0; i < rd-2; i++ {
+			p = (*m)[i+1][i]
+			q = (*m)[i+2][i]
+			if i > rd-4 {
+				r = 0
+			} else {
+				r = (*m)[i+3][i]
+			}
+			P = getP(i, p, q, r)
+			*m = *P.Mul(m).Mul(&P)
+		}
+		return *m
+	}
+	if rn <= 2 {
+		*ret = append(*ret, m.eig2()...)
+	} else {
+		for i := rn - 1; i > 0; i-- {
+			if Abs((*m)[i][i-1]) < zero {
+				sd := rn - i
+				sm := getChunk(m, i)
+				switch {
+				case sd <= 2:
+					sm.eig(ret)
+				default:
+					*sm = qr2(sm)
+					sm.eig(ret)
+
+				}
+				i = m.GetRowNum() - 1
+			}
+		}
+		switch {
+		case m.GetRowNum() <= 2:
+			m.eig(ret)
+		default:
+			*m = qr2(m)
+			m.eig(ret)
+		}
+	}
+	return
+}
+
+func (m *Matrixf64) Eig() (ret []complex128) {
+	rn := m.GetRowNum()
+	cn := m.GetColNum()
+	if rn != cn {
+		panic("Matrix must be square.")
+	}
+
+	_, tmp := m.Hess()
+	tmp.eig(&ret)
+	return
+}
+
+func (m *Matrixf64) Gauss() *Matrixf64 {
+	tmp := NewMatrixf64(*m)
+	tmp.gauss(0)
+	return &tmp
+}
+
+/* WARNING: this function will damage the matrix 'm' */
+func (m *Matrixf64) gauss(offset int) {
+	rn := m.GetRowNum()
+	cn := m.GetColNum()
+	d := func(i, j int) (ret int) {
+		if i >= j {
+			ret = j
+		} else {
+			ret = i
+		}
+		return ret
+	}(rn, cn)
+
+	getChunk := func(m *Matrixf64, i, j int) (sm *Matrixf64) {
+		rows := rn - i
+		cols := cn - j
+		rindex := make([]int, rows)
+		cindex := make([]int, cols)
+		for _i := 0; _i < rows; _i++ {
+			rindex[_i] = _i + i
+		}
+
+		for _i := 0; _i < cols; _i++ {
+			cindex[_i] = _i + j
+		}
+		sm = m.Piece(rindex, cindex)
+		return
+	}
+
+	for i := 0; i < d; i++ {
+		maxIndex := m.pivot(i)
+		if maxIndex != i {
+			m.exchange(i, maxIndex)
+		}
+		if Abs((*m)[i][i]) < zero {
+			below := getChunk(m, i, i)
+			if rm := Of64(below.GetRowNum(), below.GetColNum()); below.Equal(&rm) {
+				break
+			}
+			sm := getChunk(m, i, i+1)
+			sm.gauss(i)
+			*m = func(tm *Matrixf64) Matrixf64 {
+				return *m.Replace(tm, i, i+1)
+			}(sm)
+			break
+		}
+
+		m.multiple(i, 1.0/(*m)[i][i])
+		for j := i + 1; j < d; j++ {
+			dMul := -(*m)[j][i] / (*m)[i][i]
+			m.multipleAdd(j, i, dMul)
+
+		}
+	}
+
+	if rn > d {
+		x := rn - d
+		O := Of64(x, cn)
+		*m = *m.Replace(&O, d, 0)
+	}
+}
+
+/* WARNING: this function will damage the matrix 'm' */
+func (m *Matrixf64) rank() int {
+	rn := m.GetRowNum()
+	cn := m.GetColNum()
+	rank := 0
+	if rn > cn {
+		return m.T().rank()
+	}
+
+	getChunk := func(m *Matrixf64, i, j int) (sm *Matrixf64) {
+		rows := rn - i
+		cols := cn - j
+		rindex := make([]int, rows)
+		cindex := make([]int, cols)
+		for _i := 0; _i < rows; _i++ {
+			rindex[_i] = _i + i
+		}
+
+		for _i := 0; _i < cols; _i++ {
+			cindex[_i] = _i + j
+		}
+		sm = m.Piece(rindex, cindex)
+		return
+	}
+
+	tmp := *m
+	for i := 0; i < rn; i++ {
+		maxIndex := tmp.pivot(i)
+		if maxIndex != i {
+			tmp.exchange(i, maxIndex)
+		}
+		if Abs(tmp[i][i]) < zero {
+			below := getChunk(&tmp, i, i)
+			if rm := Of64(below.GetRowNum(), below.GetColNum()); below.Equal(&rm) {
+				break
+			}
+			sm := getChunk(&tmp, i, i+1)
+			rank += sm.rank()
+			break
+		} else {
+			rank++
+		}
+
+		for j := i + 1; j < rn; j++ {
+			dMul := -tmp[j][i] / tmp[i][i]
+			tmp.multipleAdd(j, i, dMul)
+		}
+	}
+	return rank
+}
+
+func (m *Matrixf64) MatrixNorm1() (ret float64) {
+	rn := m.GetRowNum()
+	cn := m.GetColNum()
+	if rn != cn {
+		panic("Matrix must be square.")
+	}
+	ret = -1
+	for j := 0; j < cn; j++ {
+		sum := 0.0
+		for i := 0; i < rn; i++ {
+			sum += (*m)[i][j]
+		}
+
+		if ret < sum {
+			ret = sum
+		}
+	}
+	return
+}
+
+func (m *Matrixf64) Rou() (ret float64) {
+	lenbda := m.Eig()
+	ret = -1
+
+	for _, v := range lenbda {
+		abs := cmplx.Abs(v)
+
+		if ret < abs {
+			ret = abs
+		}
+	}
+	return
+}
+
+func (m *Matrixf64) MatrixNorm2() (ret float64) {
+	rn := m.GetRowNum()
+	cn := m.GetColNum()
+	if rn != cn {
+		panic("Matrix must be square.")
+	}
+
+	return Sqrt(m.T().Mul(m).Rou())
+}
+
+func (m *Matrixf64) MatrixNormInf() (ret float64) {
+	rn := m.GetRowNum()
+	cn := m.GetColNum()
+	if rn != cn {
+		panic("Matrix must be square.")
+	}
+	ret = -1
+	for _, r := range *m {
+		sum := 0.0
+		for _, v := range r {
+			sum += Abs(v)
+		}
+
+		if ret < sum {
+			ret = sum
+		}
+	}
+	return
+}
+
+func (m *Matrixf64) Cond() (ret float64) {
+	return m.Inv().MatrixNorm2() * m.MatrixNorm2()
+}
+
+/*
+	If you can guarantee that the coefficient matrix is nonsingular, 
+	should use 'Solve' instead of this for its low efficiency
+*/
+func (m *Matrixf64) SolveEquation(b *Matrixf64) (x *Matrixf64, e error) {
+	rn := m.GetRowNum()
+	cn := m.GetColNum()
+	if rn != cn {
+		panic("Matrix must be square.")
+	}
+
+	tmp := m.InsertCols(b, m.GetColNum())
+	if tmp.Rank() > m.Rank() {
+		e = &MatrixErr{"Equation has no solution"}
+		x = nil
+		return
+	}
+	e = nil
+	gauss := *tmp.Gauss()
+	d := rn
+	findAndExchange := func(i int) bool {
+		for j := i + 1; j < d; j++ {
+			if Abs(gauss[i][j]) > zero {
+				gauss[i], gauss[j] = gauss[j], gauss[i]
+				return true
+			}
+		}
+		return false
+	}
+
+	for i := 0; i < d; i++ {
+		if Abs(gauss[i][i]) < zero {
+		again:
+			if findAndExchange(i) {
+				goto again
+			}
+			gauss[i][i] = 1
+			gauss[i][d] = 1
+		}
+	}
+	x = func() *Matrixf64 {
+		row := make([]int, d)
+		for i := 0; i < d; i++ {
+			row[i] = i
+		}
+		col := []int{d}
+		tmp := *gauss.Piece(row, col)
+
+		for i := d - 1; i >= 0; i-- {
+			sum := 0.0
+			for j := i + 1; j < d; j++ {
+				sum += gauss[i][j] * tmp[j][0]
+			}
+			tmp[i][0] = tmp[i][0] - sum/gauss[i][i]
+		}
+
+		sum := tmp.VectorNorm2()
+		tmp = *tmp.DivDot(sum)
+		return &tmp
+	}()
+	return
+}
+
+func (m *Matrixf64) InsertCols(im *Matrixf64, col int) *Matrixf64 {
+	mrn := m.GetRowNum()
+	mcn := m.GetColNum()
+	irn := im.GetRowNum()
+	icn := im.GetColNum()
+
+	if mrn != irn {
+		panic("The two matrix must same numbers of rows.")
+	}
+
+	rn := mrn
+	cn := mcn + icn
+	tmp := Of64(rn, cn)
+	tmp = *tmp.Replace(im, 0, col)
+	for i := 0; i < mrn; i++ {
+		for j := 0; j < mcn; j++ {
+			var _j int
+			if j >= col {
+				_j += j + icn
+			} else {
+				_j = j
+			}
+			tmp[i][_j] = (*m)[i][j]
+
+		}
+	}
+	return &tmp
+}
+
+func (m *Matrixf64) InsertRows(im *Matrixf64, row int) *Matrixf64 {
+	mrn := m.GetRowNum()
+	mcn := m.GetColNum()
+	irn := im.GetRowNum()
+	icn := im.GetColNum()
+
+	if mcn != icn {
+		panic("The two matrix must same numbers of columns.")
+	}
+
+	rn := mrn + irn
+	cn := mcn
+	tmp := Of64(rn, cn)
+	tmp = *tmp.Replace(im, row, 0)
+	for i := 0; i < mrn; i++ {
+		for j := 0; j < mcn; j++ {
+			var _i int
+			if i >= row {
+				_i += i + irn
+			} else {
+				_i = i
+			}
+			tmp[_i][j] = (*m)[i][j]
+
+		}
+	}
+	return &tmp
 }
